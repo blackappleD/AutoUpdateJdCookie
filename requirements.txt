@@ -4,3 +4,5 @@ playwright
 loguru
 croniter
 inputimeout
+redis
+pymysql

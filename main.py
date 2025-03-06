@@ -4,6 +4,7 @@ import asyncio
 from api.qinglong import QlApi, QlOpenApi
 from api.send import SendApi
 from utils.ck import get_invalid_ck_ids
+from utils.db_manager import RedisManager, MysqlManager
 from config import (
     qinglong_data,
     user_datas,
@@ -64,6 +65,26 @@ try:
 except ImportError:
     enable_desensitize = False
 
+# 导入新增配置
+try:
+    from config import (
+        mysql_config,
+        redis_config,
+        account_source,
+        cookie_source,
+        cookie_target,
+        sms_func
+    )
+except ImportError:
+    # 默认使用原有方式
+    mysql_config = {"host": "127.0.0.1", "port": 3306, "user": "root", "password": "", "database": ""}
+    redis_config = {"host": "127.0.0.1", "port": 6379, "db": 0, "password": None}
+    account_source = "config"
+    cookie_source = "qinglong"
+    cookie_target = "qinglong"
+    sms_func = "manual_input"  # 默认使用手动输入
+
+
 async def download_image(url, filepath):
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
@@ -85,14 +106,16 @@ async def check_notice(page):
                 return notice && notice.textContent.trim() !== '' ? notice.textContent.trim() : false;
             }
             """,
-            timeout = 3000
+            timeout=3000
         )
         raise RuntimeError(notice)
     except TimeoutError:
         logger.info("登录未发现报错")
         return
 
-async def auto_move_slide_v2(page, retry_times: int = 2, slider_selector: str = 'img.move-img', move_solve_type: str = ""):
+
+async def auto_move_slide_v2(page, retry_times: int = 2, slider_selector: str = 'img.move-img',
+                             move_solve_type: str = ""):
     for i in range(retry_times):
         logger.info(f'第{i + 1}次开启滑块验证')
         # 查找小图
@@ -102,7 +125,7 @@ async def auto_move_slide_v2(page, retry_times: int = 2, slider_selector: str = 
         except Exception as e:
             logger.info('未找到验证码框, 退出滑块验证')
             return
-        await auto_move_slide(page, retry_times=5, slider_selector = slider_selector, move_solve_type = move_solve_type)
+        await auto_move_slide(page, retry_times=5, slider_selector=slider_selector, move_solve_type=move_solve_type)
 
         # 判断是否一次过了滑块
         captcha_drop_visible = await page.is_visible('.captcha_drop')
@@ -126,6 +149,7 @@ async def auto_move_slide_v2(page, retry_times: int = 2, slider_selector: str = 
             await asyncio.sleep(1)
             continue
         return
+
 
 async def auto_move_slide(page, retry_times: int = 2, slider_selector: str = 'img.move-img', move_solve_type: str = ""):
     """
@@ -151,16 +175,20 @@ async def auto_move_slide(page, retry_times: int = 2, slider_selector: str = 'im
 
         # 保存小图
         small_img_path = save_img('small_img', small_img_bytes)
-        small_img_width = await page.evaluate('() => { return document.getElementById("small_img").clientWidth; }')  # 获取网页的图片尺寸
-        small_img_height = await page.evaluate('() => { return document.getElementById("small_img").clientHeight; }')  # 获取网页的图片尺寸
+        small_img_width = await page.evaluate(
+            '() => { return document.getElementById("small_img").clientWidth; }')  # 获取网页的图片尺寸
+        small_img_height = await page.evaluate(
+            '() => { return document.getElementById("small_img").clientHeight; }')  # 获取网页的图片尺寸
         small_image = Image.open(small_img_path)  # 打开图像
         resized_small_image = small_image.resize((small_img_width, small_img_height))  # 调整图像尺寸
         resized_small_image.save(small_img_path)  # 保存调整后的图像
 
         # 保存大图
         background_img_path = save_img('background_img', background_img_bytes)
-        background_img_width = await page.evaluate('() => { return document.getElementById("cpc_img").clientWidth; }')  # 获取网页的图片尺寸
-        background_img_height = await page.evaluate('() => { return document.getElementById("cpc_img").clientHeight; }')  # 获取网页的图片尺寸
+        background_img_width = await page.evaluate(
+            '() => { return document.getElementById("cpc_img").clientWidth; }')  # 获取网页的图片尺寸
+        background_img_height = await page.evaluate(
+            '() => { return document.getElementById("cpc_img").clientHeight; }')  # 获取网页的图片尺寸
         background_image = Image.open(background_img_path)  # 打开图像
         resized_background_image = background_image.resize((background_img_width, background_img_height))  # 调整图像尺寸
         resized_background_image.save(background_img_path)  # 保存调整后的图像
@@ -226,7 +254,6 @@ async def auto_shape(page, retry_times: int = 5):
 
         # 找到刷新按钮
         refresh_button = page.locator('.jcap_refresh')
-
 
         # 获取文字图并保存
         word_img_bytes = get_img_bytes(word_img_src)
@@ -372,133 +399,131 @@ async def auto_shape(page, retry_times: int = 5):
                 continue
 
 
-async def sms_recognition(page, user, mode):
+async def sms_recognition(page, user, user_data_dict, mode):
+    """
+    短信验证码识别
+    """
     try:
-        from config import sms_func
+        from config import sms_func, sms_webhook
     except ImportError:
         sms_func = "no"
+        sms_webhook = ""
 
-    sms_func = user_datas[user].get("sms_func", sms_func)
+    # 优先使用用户自己的配置
+    sms_func = user_data_dict[user].get("sms_func", sms_func)
 
-    if sms_func not in supported_sms_func:
-        raise Exception(f"sms_func只支持{supported_sms_func}")
-
+    # 如果是cron模式，且sms_func为manual_input，则自动转为no
     if mode == "cron" and sms_func == "manual_input":
         sms_func = "no"
 
     if sms_func == "no":
-        raise Exception("sms_func为no关闭, 跳过短信验证码识别环节")
+        logger.info("短信验证码识别已关闭")
+        return False
 
-    logger.info('点击【获取验证码】中')
-    await page.click('button.getMsg-btn')
-    await asyncio.sleep(1)
-    # 自动识别滑块
-    await auto_move_slide(page, retry_times=5, slider_selector='div.bg-blue')
-    await auto_shape(page, retry_times=30)
+    # 等待短信验证码输入框出现
+    try:
+        await page.wait_for_selector("#authcode", timeout=1000)
+    except TimeoutError:
+        logger.info("没有触发短信验证码")
+        return False
 
-    # 识别是否成功发送验证码
-    await page.wait_for_selector('button.getMsg-btn:has-text("重新发送")', timeout=3000)
-    logger.info("发送短信验证码成功")
-
-    # 手动输入
-    # 用户在60S内，手动在终端输入验证码
+    logger.info("触发短信验证码")
     if sms_func == "manual_input":
-        from inputimeout import inputimeout, TimeoutOccurred
         try:
-            verification_code = inputimeout(prompt="请输入验证码：", timeout=60)
+            from inputimeout import inputimeout, TimeoutOccurred
+            verification_code = inputimeout(prompt='请输入短信验证码: ', timeout=60)
+            if not is_valid_verification_code(verification_code):
+                logger.error("验证码格式错误")
+                return False
         except TimeoutOccurred:
-            return
-
-    # 通过调用web_hook的方式来实现全自动输入验证码
+            logger.error("验证码输入超时")
+            return False
     elif sms_func == "webhook":
-        from utils.tools import send_request
+        # 优先使用用户自己的配置
+        sms_webhook = user_data_dict[user].get("sms_webhook", sms_webhook)
         try:
-            from config import sms_webhook
-        except ImportError:
-            sms_webhook = ""
-        sms_webhook = user_datas[user].get("sms_webhook", sms_webhook)
+            async with aiohttp.ClientSession() as session:
+                async with session.get(sms_webhook) as response:
+                    if response.status == 200:
+                        verification_code = await response.text()
+                        if not is_valid_verification_code(verification_code):
+                            logger.error("验证码格式错误")
+                            return False
+                    else:
+                        logger.error(f"获取验证码失败，状态码：{response.status}")
+                        return False
+        except Exception as e:
+            logger.error(f"获取验证码失败，错误信息：{e}")
+            return False
+    else:
+        logger.error(f"不支持的短信验证码识别方式：{sms_func}")
+        return False
 
-        if sms_webhook is None:
-            raise Exception(f"sms_webhook未配置")
-
-        headers = {
-            'Content-Type': 'application/json',
-        }
-        data = {"phone_number": user}
-        response = await send_request(url=sms_webhook, method="post", headers=headers, data=data)
-        verification_code = response['data']['code']
-
-    await asyncio.sleep(1)
-    if not is_valid_verification_code(verification_code):
-        logger.error(f"验证码需为6位数字, 输入的验证码为{verification_code}, 异常")
-        raise Exception(f"验证码异常")
-
-    logger.info('填写验证码中...')
-    verification_code_input = page.locator('input.acc-input.msgCode')
-    for v in verification_code:
-        await verification_code_input.type(v, no_wait_after=True)
-        await asyncio.sleep(random.random() / 10)
-
-    logger.info('点击提交中...')
-    await page.click('a.btn')
+    # 输入验证码
+    await page.fill("#authcode", verification_code)
+    # 点击登录
+    await page.click(".btn-sms-login")
+    return True
 
 
-async def voice_verification(page, user, mode):
-    from utils.consts import supported_voice_func
+async def voice_verification(page, user, user_data_dict, mode):
+    """
+    语音验证码识别
+    """
     try:
         from config import voice_func
     except ImportError:
         voice_func = "no"
 
-    voice_func = user_datas[user].get("voice_func", voice_func)
+    # 优先使用用户自己的配置
+    voice_func = user_data_dict[user].get("voice_func", voice_func)
 
-    if voice_func not in supported_voice_func:
-        raise Exception(f"voice_func只支持{supported_voice_func}")
-
+    # 如果是cron模式，且voice_func为manual_input，则自动转为no
     if mode == "cron" and voice_func == "manual_input":
         voice_func = "no"
 
     if voice_func == "no":
-        raise Exception("voice_func为no关闭, 跳过手机语音识别")
+        logger.info("语音验证码识别已关闭")
+        return False
 
-    logger.info('点击获取验证码中')
-    await page.click('button.getMsg-btn:has-text("点击获取验证码")')
-    await asyncio.sleep(1)
-    # 自动识别滑块
-    await auto_move_slide(page, retry_times=5, slider_selector='div.bg-blue')
-    await auto_shape(page, retry_times=30)
+    # 等待语音验证码输入框出现
+    try:
+        await page.wait_for_selector("#authcode", timeout=1000)
+    except TimeoutError:
+        logger.info("没有触发语音验证码")
+        return False
 
-    # 识别是否成功发送验证码
-    await page.wait_for_selector('button.getMsg-btn:has-text("重新发送")', timeout=3000)
-    logger.info("发送手机语音识别验证码成功")
-
-    # 手动输入
-    # 用户在60S内，手动在终端输入验证码
+    logger.info("触发语音验证码")
     if voice_func == "manual_input":
-        from inputimeout import inputimeout, TimeoutOccurred
         try:
-            verification_code = inputimeout(prompt="请输入验证码：", timeout=60)
+            from inputimeout import inputimeout, TimeoutOccurred
+            verification_code = inputimeout(prompt='请输入语音验证码: ', timeout=60)
+            if not is_valid_verification_code(verification_code):
+                logger.error("验证码格式错误")
+                return False
         except TimeoutOccurred:
-            return
+            logger.error("验证码输入超时")
+            return False
+    else:
+        logger.error(f"不支持的语音验证码识别方式：{voice_func}")
+        return False
 
-    await asyncio.sleep(1)
-    if not is_valid_verification_code(verification_code):
-        logger.error(f"验证码需为6位数字, 输入的验证码为{verification_code}, 异常")
-        raise Exception(f"验证码异常")
-
-    logger.info('填写验证码中...')
-    verification_code_input = page.locator('input.acc-input.msgCode')
-    for v in verification_code:
-        await verification_code_input.type(v, no_wait_after=True)
-        await asyncio.sleep(random.random() / 10)
-
-    logger.info('点击提交中...')
-    await page.click('a.btn')
+    # 输入验证码
+    await page.fill("#authcode", verification_code)
+    # 点击登录
+    await page.click(".btn-sms-login")
+    return True
 
 
-async def get_jd_pt_key(playwright: Playwright, user, mode) -> Union[str, None]:
+async def get_jd_pt_key(playwright: Playwright, user, user_data_dict, mode) -> Union[str, None]:
     """
     获取jd的pt_key
+    
+    :param playwright: Playwright实例
+    :param user: 用户名
+    :param user_data_dict: 用户数据字典
+    :param mode: 运行模式
+    :return: pt_key或None
     """
 
     try:
@@ -536,7 +561,7 @@ async def get_jd_pt_key(playwright: Playwright, user, mode) -> Union[str, None]:
         await page.set_viewport_size({"width": 360, "height": 640})
         await page.goto(jd_login_url)
 
-        if user_datas[user].get("user_type") == "qq":
+        if user_data_dict[user].get("user_type") == "qq":
             await page.get_by_role("checkbox").check()
             await asyncio.sleep(1)
             # 点击QQ登录
@@ -559,7 +584,7 @@ async def get_jd_pt_key(playwright: Playwright, user, mode) -> Union[str, None]:
             await asyncio.sleep(1)
             # 填写密码
             password_input = iframe.locator("#p")  # 替换为实际的密码
-            password = user_datas[user]["password"]
+            password = user_data_dict[user]["password"]
             for p in password:
                 await password_input.type(p, no_wait_after=True)
                 await asyncio.sleep(random.random() / 10)
@@ -584,7 +609,7 @@ async def get_jd_pt_key(playwright: Playwright, user, mode) -> Union[str, None]:
                 await asyncio.sleep(random.random() / 10)
 
             password_input = page.locator("#pwd")
-            password = user_datas[user]["password"]
+            password = user_data_dict[user]["password"]
             for p in password:
                 await password_input.type(p, no_wait_after=True)
                 await asyncio.sleep(random.random() / 10)
@@ -606,12 +631,12 @@ async def get_jd_pt_key(playwright: Playwright, user, mode) -> Union[str, None]:
             await asyncio.sleep(1)
             if await page.locator('text="手机短信验证"').count() != 0:
                 logger.info("开始短信验证码识别环节")
-                await sms_recognition(page, user, mode)
+                await sms_recognition(page, user, user_data_dict, mode)
 
             # 进行手机语音验证识别
             if await page.locator('div#header .text-header:has-text("手机语音验证")').count() > 0:
                 logger.info("检测到手机语音验证页面,开始识别")
-                await voice_verification(page, user, mode)
+                await voice_verification(page, user, user_data_dict, mode)
 
             # 检查警告,如账号存在风险或账密不正确等
             await check_notice(page)
@@ -684,92 +709,249 @@ async def get_ql_api(ql_data):
     return qlapi
 
 
+async def init_data_sources():
+    """初始化数据源连接"""
+    redis_manager = None
+    mysql_manager = None
+    qlapi = None
+
+    # 初始化Redis连接（如果需要）
+    if cookie_source == "redis" or cookie_target == "redis":
+        redis_manager = RedisManager(
+            host=redis_config.get("host", "127.0.0.1"),
+            port=redis_config.get("port", 6379),
+            db=redis_config.get("db", 0),
+            password=redis_config.get("password")
+        )
+
+    # 初始化MySQL连接（如果需要）
+    if account_source == "mysql":
+        mysql_manager = MysqlManager(
+            host=mysql_config.get("host", "127.0.0.1"),
+            port=mysql_config.get("port", 3306),
+            user=mysql_config.get("user", "root"),
+            password=mysql_config.get("password", ""),
+            database=mysql_config.get("database", "")
+        )
+
+    # 初始化青龙API（如果需要）
+    if cookie_source == "qinglong" or cookie_target == "qinglong":
+        qlapi = await get_ql_api(qinglong_data)
+
+    return redis_manager, mysql_manager, qlapi
+
+
+async def get_user_data(mysql_manager):
+    """获取用户数据"""
+    if account_source == "config":
+        # 使用配置文件中的用户数据
+        return user_datas
+    elif account_source == "mysql" and mysql_manager:
+        # 从MySQL获取用户数据
+        user_data_dict = {}
+        accounts = mysql_manager.get_all_accounts()
+        for account in accounts:
+            username = account.get("username")
+            user_data_dict[username] = {
+                "password": account.get("password"),
+                "pt_pin": username,  # 使用username作为pt_pin
+                "phone": account.get("phone"),
+                "sms_func": sms_func,  # 使用全局配置的短信验证方式
+            }
+        return user_data_dict
+    return {}
+
+
+async def get_cookies_data(redis_manager, qlapi):
+    """获取Cookie数据"""
+    jd_ck_env_datas = []
+    update_all_accounts = False
+    
+    if cookie_source == "qinglong" and qlapi:
+        # 从青龙面板获取Cookie
+        response = await qlapi.get_envs()
+        if response['code'] == 200:
+            logger.info("获取青龙环境变量成功")
+            env_data = response['data']
+            # 获取值为JD_COOKIE的环境变量
+            jd_ck_env_datas = filter_cks(env_data, name='JD_COOKIE')
+            # 从value中过滤出pt_pin, 注意只支持单行单pt_pin
+            jd_ck_env_datas = [{**x, 'pt_pin': extract_pt_pin(x['value'])} for x in jd_ck_env_datas if extract_pt_pin(x['value'])]
+        else:
+            logger.error(f"获取青龙环境变量失败， response: {response}")
+            raise Exception(f"获取青龙环境变量失败， response: {response}")
+    elif cookie_source == "redis" and redis_manager:
+        # 从Redis获取Cookie
+        logger.info("从Redis获取Cookie")
+        cookies_dict = redis_manager.get_all_cookies()
+        logger.info(f"从Redis获取到的Cookie数据类型: {type(cookies_dict)}, 值: {cookies_dict}")
+        
+        # 检查Redis中是否有Cookie数据
+        if cookies_dict is None or (isinstance(cookies_dict, dict) and len(cookies_dict) == 0):
+            logger.info("Redis中的JD_COOKIE_MAP为空或不存在，将更新所有账号的Cookie")
+            update_all_accounts = True
+        else:
+            logger.info(f"Redis中的JD_COOKIE_MAP包含 {len(cookies_dict)} 个账号的Cookie")
+        
+        for username, cookie in cookies_dict.items() if cookies_dict else {}:
+            pt_pin = extract_pt_pin(cookie)
+            if pt_pin:
+                jd_ck_env_datas.append({
+                    'id': username,  # 使用username作为ID
+                    'value': cookie,
+                    'status': 0,  # 默认启用状态
+                    'pt_pin': pt_pin,
+                    'name': 'JD_COOKIE',
+                    'remarks': f'用户: {username}'
+                })
+    
+    return jd_ck_env_datas, update_all_accounts
+
+
+async def check_cookies(jd_ck_env_datas, qlapi):
+    """检查Cookie有效性"""
+    try:
+        logger.info("检测CK任务开始")
+        # 先获取启用中的env_data
+        up_jd_ck_list = filter_cks(jd_ck_env_datas, status=0, name='JD_COOKIE')
+        # 这一步会去检测这些JD_COOKIE
+        invalid_cks_id_list = await get_invalid_ck_ids(up_jd_ck_list)
+        if invalid_cks_id_list:
+            # 更新jd_ck_env_datas中失效CK的状态
+            jd_ck_env_datas = [
+                {**x, 'status': 1} if x.get('id') in invalid_cks_id_list or x.get('_id') in invalid_cks_id_list else x
+                for x in jd_ck_env_datas]
+
+            # 如果使用青龙面板，则禁用失效环境变量
+            if cookie_source == "qinglong" and qlapi:
+                ck_ids_datas = bytes(json.dumps(invalid_cks_id_list), 'utf-8')
+                await qlapi.envs_disable(data=ck_ids_datas)
+        logger.info("检测CK任务完成")
+        return jd_ck_env_datas
+    except Exception as e:
+        traceback.print_exc()
+        logger.error(f"检测CK任务失败, 跳过检测, 报错原因为{e}")
+        return jd_ck_env_datas
+
+
+async def get_update_users(jd_ck_env_datas, user_data_dict, update_all_accounts):
+    """获取需要更新的用户"""
+    if update_all_accounts:
+        logger.info("即将更新所有账号的Cookie")
+        user_dict = {}
+        for username, user_data in user_data_dict.items():
+            user_dict[username] = {
+                'id': username,
+                'value': '',  # 空值，稍后会在更新时填充
+                'name': 'JD_COOKIE',
+                'remarks': f'用户: {username}'
+            }
+        return user_dict
+
+    # 获取需强制更新pt_pin
+    force_update_pt_pins = [user_data_dict[key]["pt_pin"] for key in user_data_dict if
+                            user_data_dict[key].get("force_update") is True]
+    # 获取禁用和需要强制更新的users
+    forbidden_users = [x for x in jd_ck_env_datas if (x['status'] == 1 or x['pt_pin'] in force_update_pt_pins)]
+
+    if not forbidden_users:
+        logger.info("所有COOKIE环境变量正常，无需更新")
+        return {}
+
+    # 获取需要的字段
+    filter_users_list = filter_forbidden_users(forbidden_users, ['_id', 'id', 'value', 'remarks', 'name'])
+
+    # 生成字典
+    user_dict = get_forbidden_users_dict(filter_users_list, user_data_dict)
+    if not user_dict:
+        logger.info("失效的CK信息未配置在user_datas内，无需更新")
+
+    return user_dict
+
+
+async def update_cookie(user, user_dict, user_data_dict, redis_manager, qlapi, send_api, mode):
+    """更新单个用户的Cookie"""
+    logger.info(f"开始更新{desensitize_account(user, enable_desensitize)}")
+
+    # 登录JD获取pt_key
+    async with async_playwright() as playwright:
+        pt_key = await get_jd_pt_key(playwright, user, user_data_dict, mode)
+
+    if pt_key is None:
+        logger.error(f"获取pt_key失败")
+        await send_msg(send_api, send_type=1, msg=f"{desensitize_account(user, enable_desensitize)} 更新失败")
+        return False
+
+    req_data = user_dict[user]
+    new_cookie = f"pt_key={pt_key};pt_pin={user_data_dict[user]['pt_pin']};"
+    req_data["value"] = new_cookie
+    logger.info(f"更新内容为{req_data}")
+
+    # 根据配置决定存储位置
+    if cookie_target == "qinglong" and qlapi:
+        # 更新青龙面板的Cookie
+        data = json.dumps(req_data)
+        response = await qlapi.set_envs(data=data)
+        if response['code'] != 200:
+            logger.error(f"{desensitize_account(user, enable_desensitize)}更新失败, response: {response}")
+            await send_msg(send_api, send_type=1, msg=f"{desensitize_account(user, enable_desensitize)} 更新失败")
+            return False
+
+        # 启用环境变量
+        req_id = f"[{req_data['id']}]" if 'id' in req_data.keys() else f'[\"{req_data["_id"]}\"]'
+        data = bytes(req_id, 'utf-8')
+        response = await qlapi.envs_enable(data=data)
+        if response['code'] != 200:
+            logger.error(f"{desensitize_account(user, enable_desensitize)}启用失败, response: {response}")
+            return False
+
+    elif cookie_target == "redis" and redis_manager:
+        # 更新Redis中的Cookie
+        if not redis_manager.set_cookie(user, new_cookie):
+            logger.error(f"{desensitize_account(user, enable_desensitize)}更新失败")
+            await send_msg(send_api, send_type=1, msg=f"{desensitize_account(user, enable_desensitize)} 更新失败")
+            return False
+
+    logger.info(f"{desensitize_account(user, enable_desensitize)}更新成功")
+    await send_msg(send_api, send_type=0, msg=f"{desensitize_account(user, enable_desensitize)} 更新成功")
+    return True
+
+
 async def main(mode: str = None):
     """
     :param mode 运行模式, 当mode = cron时，sms_func为 manual_input时，将自动传成no
     """
     try:
-        qlapi = await get_ql_api(qinglong_data)
         send_api = SendApi("ql")
-        # 拿到禁用的用户列表
-        response = await qlapi.get_envs()
-        if response['code'] == 200:
-            logger.info("获取环境变量成功")
-        else:
-            logger.error(f"获取环境变量失败， response: {response}")
-            raise Exception(f"获取环境变量失败， response: {response}")
 
-        env_data = response['data']
-        # 获取值为JD_COOKIE的环境变量
-        jd_ck_env_datas = filter_cks(env_data, name='JD_COOKIE')
-        # 从value中过滤出pt_pin, 注意只支持单行单pt_pin
-        jd_ck_env_datas = [ {**x, 'pt_pin': extract_pt_pin(x['value'])} for x in jd_ck_env_datas if extract_pt_pin(x['value'])]
+        # 1. 初始化数据源
+        redis_manager, mysql_manager, qlapi = await init_data_sources()
 
-        try:
-            logger.info("检测CK任务开始")
-            # 先获取启用中的env_data
-            up_jd_ck_list = filter_cks(jd_ck_env_datas, status=0, name='JD_COOKIE')
-            # 这一步会去检测这些JD_COOKIE
-            invalid_cks_id_list = await get_invalid_ck_ids(up_jd_ck_list)
-            if invalid_cks_id_list:
-                # 禁用QL的失效环境变量
-                ck_ids_datas = bytes(json.dumps(invalid_cks_id_list), 'utf-8')
-                await qlapi.envs_disable(data=ck_ids_datas)
-                # 更新jd_ck_env_datas
-                jd_ck_env_datas = [{**x, 'status': 1} if x.get('id') in invalid_cks_id_list or x.get('_id') in invalid_cks_id_list else x for x in jd_ck_env_datas]
-            logger.info("检测CK任务完成")
-        except Exception as e:
-            traceback.print_exc()
-            logger.error(f"检测CK任务失败, 跳过检测, 报错原因为{e}")
+        # 2. 获取用户数据
+        user_data_dict = await get_user_data(mysql_manager)
 
-        # 获取需强制更新pt_pin
-        force_update_pt_pins = [user_datas[key]["pt_pin"] for key in user_datas if user_datas[key].get("force_update") is True]
-        # 获取禁用和需要强制更新的users
-        forbidden_users = [x for x in jd_ck_env_datas if (x['status'] == 1 or x['pt_pin'] in force_update_pt_pins)]
+        # 3. 获取Cookie数据
+        jd_ck_env_datas, update_all_accounts = await get_cookies_data(redis_manager, qlapi)
 
-        if not forbidden_users:
-            logger.info("所有COOKIE环境变量正常，无需更新")
-            return
+        # 4. 检查Cookie有效性（如果不是更新所有账号）
+        if not update_all_accounts:
+            jd_ck_env_datas = await check_cookies(jd_ck_env_datas, qlapi)
 
-        # 获取需要的字段
-        filter_users_list = filter_forbidden_users(forbidden_users, ['_id', 'id', 'value', 'remarks', 'name'])
-
-        # 生成字典
-        user_dict = get_forbidden_users_dict(filter_users_list, user_datas)
+        # 5. 获取需要更新的用户
+        user_dict = await get_update_users(jd_ck_env_datas, user_data_dict, update_all_accounts)
         if not user_dict:
-            logger.info("失效的CK信息未配置在user_datas内，无需更新")
+            # 关闭MySQL连接
+            if mysql_manager:
+                mysql_manager.close()
             return
 
-        # 登录JD获取pt_key
-        async with async_playwright() as playwright:
-            for user in user_dict:
-                logger.info(f"开始更新{desensitize_account(user, enable_desensitize)}")
-                pt_key = await get_jd_pt_key(playwright, user, mode)
-                if pt_key is None:
-                    logger.error(f"获取pt_key失败")
-                    await send_msg(send_api, send_type=1, msg=f"{desensitize_account(user, enable_desensitize)} 更新失败")
-                    continue
+        # 6. 更新Cookie
+        for user in user_dict:
+            await update_cookie(user, user_dict, user_data_dict, redis_manager, qlapi, send_api, mode)
 
-                req_data = user_dict[user]
-                req_data["value"] = f"pt_key={pt_key};pt_pin={user_datas[user]['pt_pin']};"
-                logger.info(f"更新内容为{req_data}")
-                data = json.dumps(req_data)
-                response = await qlapi.set_envs(data=data)
-                if response['code'] == 200:
-                    logger.info(f"{desensitize_account(user, enable_desensitize)}更新成功")
-                else:
-                    logger.error(f"{desensitize_account(user, enable_desensitize)}更新失败, response: {response}")
-                    await send_msg(send_api, send_type=1, msg=f"{desensitize_account(user, enable_desensitize)} 更新失败")
-                    continue
-
-                req_id = f"[{req_data['id']}]" if 'id' in req_data.keys() else f'[\"{req_data["_id"]}\"]'
-                data = bytes(req_id, 'utf-8')
-                response = await qlapi.envs_enable(data=data)
-                if response['code'] == 200:
-                    logger.info(f"{desensitize_account(user, enable_desensitize)}启用成功")
-                    await send_msg(send_api, send_type=0, msg=f"{desensitize_account(user, enable_desensitize)} 更新成功")
-                else:
-                    logger.error(f"{desensitize_account(user, enable_desensitize)}启用失败, response: {response}")
+        # 7. 关闭MySQL连接
+        if mysql_manager:
+            mysql_manager.close()
 
     except Exception as e:
         traceback.print_exc()
@@ -782,6 +964,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('-m', '--mode', choices=['cron'], help="运行的main的模式(例如: 'cron')")
     return parser.parse_args()
+
 
 if __name__ == '__main__':
     # 使用解析参数的函数

@@ -92,3 +92,70 @@ python schedule_main.py
 
 ## 创作不易，如果项目有帮助到你，大佬点个星或打个赏吧
 ![JPG](./img/w.jpg)
+
+## 数据源更新 (2025年3月6日更新)
+为了更灵活地支持不同的数据源，我们在本次更新中添加了Redis和MySQL数据源支持：
+
+### 1. 数据源配置
+现在可以通过配置文件中的以下参数来选择数据源类型：
+```python
+# 数据源配置
+# 账号信息来源: "config" 表示从config.py的user_datas获取，"mysql" 表示从MySQL获取
+account_source = "config"  # 或 "mysql"
+# Cookie来源: "qinglong" 表示从青龙面板获取，"redis" 表示从Redis获取
+cookie_source = "qinglong"  # 或 "redis"
+# Cookie目标存储: "qinglong" 表示存储到青龙面板，"redis" 表示存储到Redis
+cookie_target = "qinglong"  # 或 "redis"
+```
+
+### 2. MySQL配置
+当选择MySQL作为账号信息来源时，需要配置以下参数：
+```python
+# MySQL配置
+mysql_config = {
+    "host": "127.0.0.1",
+    "port": 3306,
+    "user": "root",
+    "password": "P@ssW0rd1874",
+    "database": "commodity_crawler"
+}
+```
+
+MySQL数据库中需要有一个名为`jd_account`的表，包含以下字段：
+- `username`：用户名/账号
+- `password`：密码
+- `phone`：手机号
+
+### 3. Redis配置
+当选择Redis作为Cookie来源或目标存储时，需要配置以下参数：
+```python
+# Redis配置
+redis_config = {
+    "host": "127.0.0.1",
+    "port": 6379,
+    "db": 0,
+    "password": None
+}
+```
+
+Redis中的Cookie存储格式为Hash类型，键为`JD_COOKIE_MAP`，其中：
+- 字段名(field)为用户名(username)
+- 字段值(value)为对应的cookie值
+
+### 4. 使用方式
+- 如果要从MySQL获取账号信息，将`account_source`设置为`"mysql"`
+- 如果要从Redis获取Cookie，将`cookie_source`设置为`"redis"`
+- 如果要将更新后的Cookie存储到Redis，将`cookie_target`设置为`"redis"`
+
+可以根据需要灵活组合这些选项，例如：
+- 从配置文件获取账号信息，从Redis获取Cookie，并将更新后的Cookie存储到Redis
+- 从MySQL获取账号信息，从青龙面板获取Cookie，并将更新后的Cookie存储到青龙面板
+- 从MySQL获取账号信息，从Redis获取Cookie，并将更新后的Cookie存回Redis
+
+### 5. 新功能：Redis为空时自动初始化所有账号
+当选择Redis作为Cookie来源（`cookie_source = "redis"`）时，系统会自动检测Redis中的JD_COOKIE_MAP是否为空。如果为空，则会自动对所有账号进行登录并将获取的Cookie存储到目标位置（Redis或青龙面板）。
+
+这个功能特别适用于以下场景：
+- 首次设置Redis作为数据源时
+- Redis数据丢失需要重新初始化所有账号Cookie
+- 批量更新所有账号Cookie

@@ -84,3 +84,33 @@ proxy = {
     # 代理服务器密码
     "password": ""
 }
+
+# MySQL配置
+mysql_config = {
+    "host": "127.0.0.1",
+    "port": 3306,
+    "user": "root",
+    "password": "P@ssW0rd1874",
+    "database": "commodity_crawler"
+}
+
+# Redis配置
+redis_config = {
+    "host": "127.0.0.1",
+    "port": 6379,
+    "db": 0,
+    "password": None  # 如果没有密码则为None
+}
+
+# 数据源配置
+# 账号信息来源: "config" 表示从config.py的user_datas获取，"mysql" 表示从MySQL获取
+account_source = "mysql"
+# Cookie来源: "qinglong" 表示从青龙面板获取，"redis" 表示从Redis获取
+cookie_source = "redis"
+# Cookie目标存储: "qinglong" 表示存储到青龙面板，"redis" 表示存储到Redis
+cookie_target = "redis"
+
+# 如果需要使用MySQL和Redis作为数据源，可以使用以下配置：
+# account_source = "mysql"  # 从MySQL获取账号信息
+# cookie_source = "redis"   # 从Redis获取Cookie
+# cookie_target = "redis"   # Cookie更新后存储到Redis
